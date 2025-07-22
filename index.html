@@ -1,0 +1,272 @@
+import React, { useState, useRef, useEffect } from 'react';
+import * as THREE from 'three';
+
+const WebXRScenarioPlayer = () => {
+  const [isXRSupported, setIsXRSupported] = useState(false);
+  const [currentNode, setCurrentNode] = useState(0);
+  const [showChoices, setShowChoices] = useState(false);
+  const [sessionActive, setSessionActive] = useState(false);
+  const canvasRef = useRef();
+  const sceneRef = useRef();
+  const rendererRef = useRef();
+  const videoRef = useRef();
+  const sphereRef = useRef();
+  const sessionRef = useRef();
+
+  // Scenario data structure
+  const scenario = {
+    nodes: [
+      {
+        id: 0,
+        video: '/api/placeholder/1920/960', // 360° video URL
+        choices: [
+          { text: "Explore the forest", time: 15, nextNode: 1 },
+          { text: "Return to camp", time: 15, nextNode: 2 }
+        ]
+      },
+      {
+        id: 1,
+        video: '/api/placeholder/1920/960', // Forest path video
+        choices: [
+          { text: "Climb the tree", time: 20, nextNode: 0 },
+          { text: "Follow the stream", time: 20, nextNode: 2 }
+        ]
+      },
+      {
+        id: 2,
+        video: '/api/placeholder/1920/960', // Camp video
+        choices: [
+          { text: "Start over", time: 10, nextNode: 0 }
+        ]
+      }
+    ]
+  };
+
+  useEffect(() => {
+    // Check WebXR support
+    if ('xr' in navigator) {
+      navigator.xr.isSessionSupported('immersive-vr').then(setIsXRSupported);
+    }
+    
+    initThreeJS();
+    return cleanup;
+  }, []);
+
+  const initThreeJS = () => {
+    // Scene setup
+    const scene = new THREE.Scene();
+    const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+    const renderer = new THREE.WebGLRenderer({ canvas: canvasRef.current, antialias: true });
+    
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    renderer.xr.enabled = true;
+    
+    // Create 360° video sphere
+    const geometry = new THREE.SphereGeometry(500, 60, 40);
+    geometry.scale(-1, 1, 1); // Inside-out sphere
+    
+    const video = document.createElement('video');
+    video.crossOrigin = 'anonymous';
+    video.loop = true;
+    video.muted = true;
+    video.playsInline = true;
+    
+    const videoTexture = new THREE.VideoTexture(video);
+    videoTexture.minFilter = THREE.LinearFilter;
+    videoTexture.magFilter = THREE.LinearFilter;
+    
+    const material = new THREE.MeshBasicMaterial({ map: videoTexture });
+    const sphere = new THREE.Mesh(geometry, material);
+    scene.add(sphere);
+    
+    // Store refs
+    sceneRef.current = scene;
+    rendererRef.current = renderer;
+    videoRef.current = video;
+    sphereRef.current = sphere;
+    
+    // Start render loop
+    renderer.setAnimationLoop(animate);
+    
+    loadVideoNode(0);
+  };
+
+  const loadVideoNode = (nodeId) => {
+    const node = scenario.nodes[nodeId];
+    if (!node || !videoRef.current) return;
+    
+    videoRef.current.src = node.video;
+    videoRef.current.load();
+    videoRef.current.play();
+    
+    setCurrentNode(nodeId);
+    setShowChoices(false);
+    
+    // Set up choice timers
+    node.choices.forEach(choice => {
+      setTimeout(() => {
+        if (currentNode === nodeId) {
+          setShowChoices(true);
+        }
+      }, choice.time * 1000);
+    });
+  };
+
+  const handleChoice = (nextNode) => {
+    setShowChoices(false);
+    loadVideoNode(nextNode);
+  };
+
+  const startXRSession = async () => {
+    if (!isXRSupported) return;
+    
+    try {
+      const session = await navigator.xr.requestSession('immersive-vr', {
+        requiredFeatures: ['local-floor'],
+        optionalFeatures: ['hand-tracking']
+      });
+      
+      await rendererRef.current.xr.setSession(session);
+      sessionRef.current = session;
+      setSessionActive(true);
+      
+      // Setup XR input
+      setupXRInput(session);
+      
+      session.addEventListener('end', () => {
+        setSessionActive(false);
+        sessionRef.current = null;
+      });
+      
+    } catch (error) {
+      console.error('Failed to start XR session:', error);
+    }
+  };
+
+  const setupXRInput = (session) => {
+    // Simple ray-casting for controller input
+    const raycaster = new THREE.Raycaster();
+    const tempMatrix = new THREE.Matrix4();
+    
+    session.addEventListener('inputsourceschange', (event) => {
+      const inputSources = session.inputSources;
+      
+      inputSources.forEach(inputSource => {
+        if (inputSource.targetRayMode === 'tracked-pointer') {
+          inputSource.addEventListener('select', () => {
+            if (showChoices) {
+              // Simple choice selection - first choice for now
+              const currentNodeData = scenario.nodes[currentNode];
+              if (currentNodeData.choices.length > 0) {
+                handleChoice(currentNodeData.choices[0].nextNode);
+              }
+            }
+          });
+        }
+      });
+    });
+  };
+
+  const animate = () => {
+    if (videoRef.current && videoRef.current.readyState >= videoRef.current.HAVE_CURRENT_DATA) {
+      sphereRef.current.material.map.needsUpdate = true;
+    }
+    
+    if (rendererRef.current && sceneRef.current) {
+      rendererRef.current.render(sceneRef.current, rendererRef.current.xr.getCamera());
+    }
+  };
+
+  const cleanup = () => {
+    if (sessionRef.current) {
+      sessionRef.current.end();
+    }
+    if (rendererRef.current) {
+      rendererRef.current.dispose();
+    }
+  };
+
+  const currentNodeData = scenario.nodes[currentNode];
+
+  return (
+    <div className="w-full h-screen bg-black relative">
+      <canvas 
+        ref={canvasRef}
+        className="w-full h-full"
+        style={{ display: sessionActive ? 'block' : 'none' }}
+      />
+      
+      {/* Desktop/Mobile Preview */}
+      {!sessionActive && (
+        <div className="absolute inset-0 flex flex-col items-center justify-center text-white">
+          <div className="text-center p-8">
+            <h1 className="text-4xl font-bold mb-4 text-green-400">
+              🥽 WebXR Scenario Player
+            </h1>
+            <p className="text-xl mb-8 text-gray-300">
+              Interactive 360° video experiences for Meta Quest 3
+            </p>
+            
+            {isXRSupported ? (
+              <button
+                onClick={startXRSession}
+                className="bg-green-500 hover:bg-green-600 px-8 py-4 rounded-lg text-xl font-bold transition-all transform hover:scale-105"
+              >
+                🚀 Enter VR
+              </button>
+            ) : (
+              <div className="text-center">
+                <p className="text-red-400 mb-4">WebXR not supported on this device</p>
+                <p className="text-sm text-gray-400">
+                  Use a WebXR-compatible browser on Meta Quest 3
+                </p>
+              </div>
+            )}
+            
+            <div className="mt-8 text-left max-w-md">
+              <h3 className="text-lg font-bold mb-2">Current Scenario:</h3>
+              <p className="text-sm text-gray-400 mb-2">
+                Node {currentNode + 1}: {currentNodeData.choices.length} choices available
+              </p>
+              
+              {currentNodeData.choices.map((choice, idx) => (
+                <div key={idx} className="text-xs text-gray-500 mb-1">
+                  • {choice.text} (at {choice.time}s)
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
+      
+      {/* Choice Overlay for VR */}
+      {sessionActive && showChoices && (
+        <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
+          <div className="bg-black bg-opacity-80 rounded-lg p-6 text-white text-center max-w-md">
+            <h3 className="text-2xl mb-4">Make a choice:</h3>
+            <div className="space-y-3">
+              {currentNodeData.choices.map((choice, idx) => (
+                <button
+                  key={idx}
+                  onClick={() => handleChoice(choice.nextNode)}
+                  className="block w-full bg-blue-600 hover:bg-blue-700 px-4 py-3 rounded text-lg pointer-events-auto transition-all"
+                >
+                  {choice.text}
+                </button>
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
+      
+      {/* Debug Info */}
+      <div className="absolute top-4 left-4 text-white text-sm bg-black bg-opacity-50 p-2 rounded">
+        <div>Node: {currentNode}</div>
+        <div>XR: {sessionActive ? 'Active' : 'Inactive'}</div>
+        <div>Choices: {showChoices ? 'Visible' : 'Hidden'}</div>
+      </div>
+    </div>
+  );
+};
+
+export default WebXRScenarioPlayer;
